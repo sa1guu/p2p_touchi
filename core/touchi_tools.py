@@ -879,6 +879,9 @@ class TouchiTools:
             # 发送P2P匹配请求
             request_id = await self.p2p_manager.request_match(user_id)
             
+            # 启动20分钟超时任务
+            asyncio.create_task(self._p2p_match_timeout(user_id, group_id, request_id, event))
+            
             # 获取网络状态
             network_status = self.p2p_manager.get_network_status()
             
@@ -889,7 +892,8 @@ class TouchiTools:
                 f"⏳ 队列中: {network_status['pending_matches']}/3人\n"
                 f"🎮 活跃游戏: {network_status['active_sessions']}场\n\n"
                 f"💰 已扣除200万哈夫币\n"
-                f"⏰ 等待其他玩家加入P2P网络..."
+                f"⏰ 等待其他玩家加入P2P网络...\n"
+                f"⌛ 20分钟后自动超时退出"
             )
             
         except Exception as e:
@@ -1203,6 +1207,9 @@ class TouchiTools:
             # 发送P2P匹配请求
             request_id = await self.p2p_manager.request_match(user_id)
             
+            # 启动20分钟超时任务
+            asyncio.create_task(self._p2p_match_timeout(user_id, group_id, request_id, event))
+            
             # 获取网络状态
             network_status = self.p2p_manager.get_network_status()
             
@@ -1215,7 +1222,8 @@ class TouchiTools:
                 f"🎮 活跃游戏: {network_status['active_sessions']}场\n\n"
                 f"💰 已扣除200万哈夫币\n"
                 f"🔄 同时兼容本地和P2P玩家匹配\n"
-                f"⏰ 等待其他玩家加入..."
+                f"⏰ 等待其他玩家加入...\n"
+                f"⌛ 20分钟后自动超时退出"
             )
             
         except Exception as e:
@@ -1231,3 +1239,53 @@ class TouchiTools:
             except:
                 pass
             yield event.plain_result("❌ P2P匹配失败，已退还哈夫币")
+    
+    async def _p2p_match_timeout(self, user_id, group_id, request_id, event):
+        """P2P匹配20分钟超时处理"""
+        try:
+            # 等待20分钟（1200秒）
+            await asyncio.sleep(1200)
+            
+            # 检查用户是否还在P2P队列中
+            if hasattr(self, 'p2p_manager') and self.p2p_manager:
+                # 检查请求是否还在pending状态
+                if request_id in self.p2p_manager.pending_matches:
+                    # 从P2P队列中移除用户
+                    del self.p2p_manager.pending_matches[request_id]
+                    
+                    # 更新全局队列状态（如果是协调节点）
+                    if hasattr(self.p2p_manager, 'is_coordinator') and self.p2p_manager.is_coordinator:
+                        node_id = self.p2p_manager.node_id
+                        if node_id in self.p2p_manager.global_queue_state:
+                            self.p2p_manager.global_queue_state[node_id] = max(0, 
+                                self.p2p_manager.global_queue_state[node_id] - 1)
+                    
+                    # 从本地队列中移除用户（如果存在）
+                    if hasattr(self, 'local_match_queue') and group_id in self.local_match_queue:
+                        self.local_match_queue[group_id] = [
+                            p for p in self.local_match_queue[group_id] 
+                            if p['user_id'] != user_id
+                        ]
+                    
+                    # 退还哈夫币
+                    async with aiosqlite.connect(self.db_path) as db:
+                        await db.execute(
+                            "UPDATE user_economy SET warehouse_value = warehouse_value + 2000000 WHERE user_id = ?",
+                            (user_id,)
+                        )
+                        await db.commit()
+                    
+                    # 通知用户匹配超时
+                    yield event.plain_result(
+                        f"⏰ P2P匹配超时（20分钟）\n"
+                        f"💰 已退还200万哈夫币\n"
+                        f"🔄 您可以重新发起匹配"
+                    )
+                    
+                    logger.info(f"用户 {user_id} P2P匹配超时，已退还哈夫币")
+                else:
+                    # 请求已经不在队列中，说明已经匹配成功或被其他方式移除
+                    logger.info(f"用户 {user_id} 的匹配请求 {request_id} 已不在队列中，可能已匹配成功")
+                    
+        except Exception as e:
+            logger.error(f"P2P匹配超时处理出错: {e}")
